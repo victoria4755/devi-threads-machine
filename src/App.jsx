@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef } from "react";
 
 async function loadStorage(key) {
-  try { const r = await window.storage.get(key, true); return r ? JSON.parse(r.value) : null; }
+  try { const val = localStorage.getItem(key); return val ? JSON.parse(val) : null; }
   catch { return null; }
 }
 async function saveStorage(key, val) {
-  try { await window.storage.set(key, JSON.stringify(val), true); } catch {}
+  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
 }
 
 const TABS = ["profile", "convert", "generate", "library"];
