@@ -1,5 +1,71 @@
 import { useState, useEffect, useRef } from "react";
 
+// ── Supabase client (posts only — profile/podcasts/book stay in localStorage) ─
+const SUPABASE_URL  = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_KEY  = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+async function sbFetch(path, opts = {}) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1${path}`, {
+    ...opts,
+    headers: {
+      "apikey": SUPABASE_KEY,
+      "Authorization": `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json",
+      "Prefer": opts.prefer || "return=representation",
+      ...(opts.headers || {}),
+    },
+  });
+  if (!res.ok) { const e = await res.text(); throw new Error(e); }
+  const text = await res.text();
+  return text ? JSON.parse(text) : [];
+}
+
+async function dbLoadPosts() {
+  try {
+    const rows = await sbFetch("/posts?order=created_at.desc");
+    return rows.map(r => ({
+      id: r.id, content: r.content, source: r.source || "",
+      category: r.category || "", tone: r.tone || "",
+      quote: r.quote || "", podcastName: r.podcast_name || "",
+      approved: r.approved, posted: r.posted, pinned: r.pinned,
+    }));
+  } catch { return []; }
+}
+
+async function dbSavePost(post) {
+  try {
+    await sbFetch("/posts", {
+      method: "POST",
+      prefer: "return=minimal",
+      body: JSON.stringify({
+        id: post.id, content: post.content, source: post.source || "",
+        category: post.category || "", tone: post.tone || "",
+        quote: post.quote || "", podcast_name: post.podcastName || "",
+        approved: post.approved, posted: post.posted, pinned: post.pinned,
+      }),
+    });
+  } catch(e) { console.error("dbSavePost", e); }
+}
+
+async function dbUpdatePost(id, patch) {
+  try {
+    const dbPatch = {};
+    if (patch.content   !== undefined) dbPatch.content   = patch.content;
+    if (patch.approved  !== undefined) dbPatch.approved  = patch.approved;
+    if (patch.posted    !== undefined) dbPatch.posted     = patch.posted;
+    if (patch.pinned    !== undefined) dbPatch.pinned     = patch.pinned;
+    if (patch.category  !== undefined) dbPatch.category  = patch.category;
+    if (patch.tone      !== undefined) dbPatch.tone       = patch.tone;
+    await sbFetch(`/posts?id=eq.${id}`, { method: "PATCH", prefer: "return=minimal", body: JSON.stringify(dbPatch) });
+  } catch(e) { console.error("dbUpdatePost", e); }
+}
+
+async function dbDeletePost(id) {
+  try { await sbFetch(`/posts?id=eq.${id}`, { method: "DELETE", prefer: "return=minimal" }); }
+  catch(e) { console.error("dbDeletePost", e); }
+}
+
+// localStorage still used for profile, podcasts, book
 async function loadStorage(key) {
   try { const val = localStorage.getItem(key); return val ? JSON.parse(val) : null; }
   catch { return null; }
@@ -818,10 +884,13 @@ function LibraryTab({ posts, setPosts, profile }) {
   const filterMap = { all: posts, pinned, queue, approved, posted, wisdom, podcast };
   const shown = (filterMap[filter] || posts).slice().sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
 
-  function update(id, patch) { setPosts(ps => ps.map(p => p.id === id ? { ...p, ...patch } : p)); }
+  function update(id, patch) {
+    setPosts(ps => ps.map(p => p.id === id ? { ...p, ...patch } : p));
+    dbUpdatePost(id, patch);
+  }
   function approvePost(id)       { update(id, { approved: true }); }
   function editPost(id, content) { update(id, { content }); }
-  function deletePost(id)        { setPosts(ps => ps.filter(p => p.id !== id)); }
+  function deletePost(id)        { setPosts(ps => ps.filter(p => p.id !== id)); dbDeletePost(id); }
   function pinPost(id)           { update(id, { pinned: !posts.find(p => p.id === id)?.pinned }); }
   function togglePosted(id)      { const cur = posts.find(p => p.id === id); update(id, { posted: !cur?.posted, approved: false }); }
 
@@ -845,7 +914,9 @@ function LibraryTab({ posts, setPosts, profile }) {
     try {
       const raw   = await callClaude(prompt, buildSystem(profile));
       const parts = raw.split(/\n?---+\n?/).map(s => s.trim()).filter(Boolean);
-      setPosts(ps => [...parts.map(content => ({ id: nextId(), content, approved: false, source: "More like this", category: post.category, tone: post.tone, pinned: false, posted: false })), ...ps]);
+      const morePosts = parts.map(content => ({ id: nextId(), content, approved: false, source: "More like this", category: post.category, tone: post.tone, pinned: false, posted: false }));
+      morePosts.forEach(p => dbSavePost(p));
+      setPosts(ps => [...morePosts, ...ps]);
     } catch {}
     setBusy(null);
   }
@@ -930,7 +1001,7 @@ export default function DeviThreadsMachine() {
 
   useEffect(() => {
     (async () => {
-      const [p, ps] = await Promise.all([loadStorage("devi_profile"), loadStorage("devi_posts")]);
+      const [p, ps] = await Promise.all([loadStorage("devi_profile"), dbLoadPosts()]);
       if (p)  setProfile({ ...DEFAULT_PROFILE, ...p });
       if (ps) setPosts(ps);
       setLoaded(true);
@@ -946,9 +1017,12 @@ export default function DeviThreadsMachine() {
     }, 1000);
   }, [profile, loaded]);
 
-  useEffect(() => { if (loaded) saveStorage("devi_posts", posts); }, [posts, loaded]);
-
-  function addPosts(newPosts) { setPosts(ps => [...newPosts, ...ps]); setTab("library"); }
+  // Posts are saved to Supabase individually — no bulk save needed
+  function addPosts(newPosts) {
+    newPosts.forEach(p => dbSavePost(p));
+    setPosts(ps => [...newPosts, ...ps]);
+    setTab("library");
+  }
   const queueCount = posts.filter(p => !p.approved && !p.posted).length;
 
   return (
